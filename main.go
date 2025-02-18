@@ -12,6 +12,7 @@ import (
 )
 
 var bufsize = 1024 * 1024 * 2
+var compressionLevel = zstd.SpeedFastest
 
 // flushable is an interface for writers that can flush buffered data.
 type flushable interface {
@@ -103,7 +104,7 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		}
 		defer localDecoder.Close()
 
-		localZstdEncoder, err = zstd.NewWriter(localConn)
+		localZstdEncoder, err = zstd.NewWriter(localConn, zstd.WithEncoderLevel(compressionLevel))
 		if err != nil {
 			log.Printf("Error creating zstd encoder for client: %v", err)
 			return
@@ -123,7 +124,7 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		}
 		defer remoteDecoder.Close()
 
-		remoteZstdEncoder, err = zstd.NewWriter(remoteConn)
+		remoteZstdEncoder, err = zstd.NewWriter(remoteConn, zstd.WithEncoderLevel(compressionLevel))
 		if err != nil {
 			log.Printf("Error creating zstd encoder for server: %v", err)
 			return
@@ -183,12 +184,29 @@ func main() {
 	targetAddr := flag.String("target", "", "Target address (e.g. localhost:9000)")
 	listenCompress := flag.Bool("listen-compress", false, "Enable zstd compression on the listen side")
 	remoteCompress := flag.Bool("remote-compress", false, "Enable zstd compression on the remote side")
+	compressionLevelint := flag.Int("compression-level", 7, "Compression level (1,3,7,22)")
 	flag.Parse()
-
-	if *targetAddr == "" {
-		log.Println("Target address must be provided using the -target flag")
+	if *compressionLevelint < 1 || *compressionLevelint > 22 {
+		log.Println("Compression level must be between 1 and 22")
 		os.Exit(1)
 	}
+	if *compressionLevelint == 1 {
+		compressionLevel = zstd.SpeedFastest
+	} else if *compressionLevelint == 3 {
+		compressionLevel = zstd.SpeedDefault
+	} else if *compressionLevelint == 7 {
+		compressionLevel = zstd.SpeedBetterCompression
+	} else if *compressionLevelint == 22 {
+		compressionLevel = zstd.SpeedBestCompression
+	} else {
+		compressionLevel = zstd.SpeedBetterCompression
+	}
+
+	if *targetAddr == "" {
+		log.Println("Target address must be provided using the -target flag, e.g. -target localhost:1080 -listen :8888")
+		os.Exit(1)
+	}
+	log.Printf("Compression level: %v", compressionLevel)
 
 	log.Printf("Listen compression: %v", *listenCompress)
 	log.Printf("Remote compression: %v", *remoteCompress)
