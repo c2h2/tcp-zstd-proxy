@@ -99,14 +99,14 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		log.Println("listenCompress enabled for client connection")
 		localDecoder, err := zstd.NewReader(localConn)
 		if err != nil {
-			log.Printf("Error creating zstd decoder for client: %v", err)
+			//log.Printf("Error creating zstd decoder for client: %v", err)
 			return
 		}
 		defer localDecoder.Close()
 
 		localZstdEncoder, err = zstd.NewWriter(localConn, zstd.WithEncoderLevel(compressionLevel))
 		if err != nil {
-			log.Printf("Error creating zstd encoder for client: %v", err)
+			//log.Printf("Error creating zstd encoder for client: %v", err)
 			return
 		}
 		// Use the wrapped reader/writer.
@@ -119,14 +119,14 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		log.Println("remoteCompress enabled for server connection")
 		remoteDecoder, err := zstd.NewReader(remoteConn)
 		if err != nil {
-			log.Printf("Error creating zstd decoder for server: %v", err)
+			//log.Printf("Error creating zstd decoder for server: %v", err)
 			return
 		}
 		defer remoteDecoder.Close()
 
 		remoteZstdEncoder, err = zstd.NewWriter(remoteConn, zstd.WithEncoderLevel(compressionLevel))
 		if err != nil {
-			log.Printf("Error creating zstd encoder for server: %v", err)
+			//log.Printf("Error creating zstd encoder for server: %v", err)
 			return
 		}
 		remoteReader = remoteDecoder
@@ -139,15 +139,14 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 
 	// Client -> Server: read from localReader, write to remoteWriter.
 	go func() {
-		log.Println("Copying data from client to server")
 		defer wg.Done()
 		if err := copyWithFlush(remoteWriter, localReader); err != nil {
-			log.Printf("Error copying from client to server: %v", err)
+			//log.Printf("Error copying from client to server: %v", err)
 		}
 		// If using compression on the remote side, close the encoder to send the stop symbol.
 		if remoteCompress && remoteZstdEncoder != nil {
 			if err := remoteZstdEncoder.Close(); err != nil {
-				log.Printf("Error closing remote zstd encoder: %v", err)
+				//log.Printf("Error closing remote zstd encoder: %v", err)
 			}
 		}
 		// Close both connections when this direction finishes.
@@ -158,15 +157,14 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 
 	// Server -> Client: read from remoteReader, write to localWriter.
 	go func() {
-		log.Println("Copying data from server to client")
 		defer wg.Done()
 		if err := copyWithFlush(localWriter, remoteReader); err != nil {
-			log.Printf("Error copying from server to client: %v", err)
+			//log.Printf("Error copying from server to client: %v", err)
 		}
 		// If using compression on the listen side, close the encoder to send the stop symbol.
 		if listenCompress && localZstdEncoder != nil {
 			if err := localZstdEncoder.Close(); err != nil {
-				log.Printf("Error closing local zstd encoder: %v", err)
+				//log.Printf("Error closing local zstd encoder: %v", err)
 			}
 		}
 		// Close both connections when this direction finishes.
