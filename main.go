@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -17,6 +19,41 @@ var compressionLevel = zstd.SpeedFastest
 // flushable is an interface for writers that can flush buffered data.
 type flushable interface {
 	Flush() error
+}
+
+// Global counters (using atomic operations for thread safety)
+var totalConnections int64
+
+// Map to store number of connections per upstream server.
+var connectionCounts = make(map[string]*int64)
+var countsMutex sync.Mutex
+
+// Active connection info (for reporting)
+type ConnInfo struct {
+	ID         int64
+	ClientAddr string
+	Upstream   string
+	StartTime  time.Time
+}
+
+var (
+	activeConnections = make(map[int64]ConnInfo)
+	activeMutex       sync.Mutex
+	connIDCounter     int64 // atomic counter for connection IDs
+)
+
+// addActiveConnection registers a new connection in the activeConnections map.
+func addActiveConnection(info ConnInfo) {
+	activeMutex.Lock()
+	defer activeMutex.Unlock()
+	activeConnections[info.ID] = info
+}
+
+// removeActiveConnection removes a connection from the activeConnections map.
+func removeActiveConnection(id int64) {
+	activeMutex.Lock()
+	defer activeMutex.Unlock()
+	delete(activeConnections, id)
 }
 
 // copyWithFlush reads from src and writes to dst in chunks. After writing each
@@ -61,7 +98,39 @@ func copyWithFlush(dst io.Writer, src io.Reader) error {
 // the flags, data is compressed/decompressed with zstd.
 // When one side closes, both connections are closed.
 func handleConnection(localConn net.Conn, targetAddr string, listenCompress, remoteCompress bool) {
-	log.Println("New connection from", localConn.RemoteAddr())
+	// Generate a unique connection ID.
+	upstream := targetAddr
+	connID := atomic.AddInt64(&connIDCounter, 1)
+	clientAddr := localConn.RemoteAddr().String()
+
+	// Update global counters.
+	atomic.AddInt64(&totalConnections, 1)
+
+	countsMutex.Lock()
+	if _, ok := connectionCounts[upstream]; !ok {
+		var cnt int64 = 0
+		connectionCounts[upstream] = &cnt
+	}
+	atomic.AddInt64(connectionCounts[upstream], 1)
+	countsMutex.Unlock()
+
+	// Register this connection as active.
+	connInfo := ConnInfo{
+		ID:         connID,
+		ClientAddr: clientAddr,
+		Upstream:   upstream,
+		StartTime:  time.Now(),
+	}
+	addActiveConnection(connInfo)
+
+	// Ensure clientConn is closed when done.
+	defer func() {
+		localConn.Close()
+		removeActiveConnection(connID)
+		log.Printf("Connection [%d] closed", connID)
+	}()
+
+	log.Printf("New connection [%d] from %s", connID, localConn.RemoteAddr())
 
 	// Declare remoteConn here so that it's visible in our closure.
 	var remoteConn net.Conn
@@ -76,7 +145,7 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 	// Create a common cleanup function that will close both connections.
 	var closeOnce sync.Once
 	closeBoth := func() {
-		log.Println("Closing both local and remote connections")
+		//log.Println("Closing both local and remote connections")
 		localConn.Close()
 		if remoteConn != nil {
 			remoteConn.Close()
@@ -96,7 +165,6 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 
 	// If compression is enabled on the client side.
 	if listenCompress {
-		log.Println("listenCompress enabled for client connection")
 		localDecoder, err := zstd.NewReader(localConn)
 		if err != nil {
 			//log.Printf("Error creating zstd decoder for client: %v", err)
@@ -116,7 +184,6 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 
 	// If compression is enabled on the server side.
 	if remoteCompress {
-		log.Println("remoteCompress enabled for server connection")
 		remoteDecoder, err := zstd.NewReader(remoteConn)
 		if err != nil {
 			//log.Printf("Error creating zstd decoder for server: %v", err)
@@ -151,7 +218,6 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		}
 		// Close both connections when this direction finishes.
 		closeOnce.Do(closeBoth)
-		// Uncomment for debug:
 		// log.Printf("Debug (client -> server): %s", bufLocalToRemote.String())
 	}()
 
@@ -174,6 +240,37 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 	}()
 
 	wg.Wait()
+}
+
+// printStats periodically logs a report of connection statistics and active connections.
+func printStats() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		log.Println("------- STATISTICS REPORT -------")
+		total := atomic.LoadInt64(&totalConnections)
+		log.Printf("Total connections handled: %d", total)
+
+		countsMutex.Lock()
+		for upstream, cntPtr := range connectionCounts {
+			count := atomic.LoadInt64(cntPtr)
+			log.Printf("Upstream %s: %d connections", upstream, count)
+		}
+		countsMutex.Unlock()
+
+		activeMutex.Lock()
+		if len(activeConnections) == 0 {
+			log.Println("No active connections")
+		} else {
+			log.Println("Active connections:")
+			for id, info := range activeConnections {
+				duration := time.Since(info.StartTime).Round(time.Second)
+				log.Printf("  ID %d: %s -> %s (active for %v)", id, info.ClientAddr, info.Upstream, duration)
+			}
+		}
+		activeMutex.Unlock()
+		log.Println("---------------------------------")
+	}
 }
 
 func main() {
@@ -216,6 +313,8 @@ func main() {
 		log.Fatalf("Error listening on %s: %v", *listenAddr, err)
 	}
 	defer ln.Close()
+	// Start a goroutine to periodically print statistics.
+	go printStats()
 
 	for {
 		conn, err := ln.Accept()
