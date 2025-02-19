@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -41,6 +42,35 @@ var (
 	activeMutex       sync.Mutex
 	connIDCounter     int64 // atomic counter for connection IDs
 )
+
+func getOpenFDCount() (int, error) {
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return 0, err
+	}
+	return len(entries), nil
+}
+
+func setUlimit(limit uint64) {
+	var rLimit syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		log.Fatalf("Error getting RLIMIT_NOFILE: %v", err)
+	}
+	log.Printf("Current RLIMIT_NOFILE: Cur: %d, Max: %d", rLimit.Cur, rLimit.Max)
+
+	// Set the new limit. If the requested limit exceeds the hard limit,
+	// you might need to run the process as root or adjust system settings.
+	rLimit.Cur = limit
+	if limit > rLimit.Max {
+		rLimit.Max = limit
+	}
+	err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		log.Fatalf("Error setting RLIMIT_NOFILE: %v", err)
+	}
+	log.Printf("New RLIMIT_NOFILE: Cur: %d, Max: %d", rLimit.Cur, rLimit.Max)
+}
 
 // addActiveConnection registers a new connection in the activeConnections map.
 func addActiveConnection(info ConnInfo) {
@@ -162,7 +192,6 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 	if listenCompress {
 		localDecoder, err := zstd.NewReader(localConn)
 		if err != nil {
-			//log.Printf("Error creating zstd decoder for client: %v", err)
 			return
 		}
 		defer localDecoder.Close()
@@ -171,7 +200,7 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		if err != nil {
 			return
 		}
-		defer localZstdEncoder.Close()
+		//defer localZstdEncoder.Close()
 		// Use the wrapped reader/writer.
 		localReader = localDecoder
 		localWriter = localZstdEncoder
@@ -189,16 +218,14 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		if err != nil {
 			return
 		}
-		defer remoteZstdEncoder.Close()
+		//defer remoteZstdEncoder.Close()
 		remoteReader = remoteDecoder
 		remoteWriter = remoteZstdEncoder
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	//var bufLocalToRemote, bufRemoteToLocal bytes.Buffer
 
-	// Client -> Server: read from localReader, write to remoteWriter.
 	go func() {
 		defer wg.Done()
 		if err := copyWithFlush(remoteWriter, localReader); err != nil {
@@ -212,7 +239,6 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 		closeOnce.Do(closeBoth)
 	}()
 
-	// Server -> Client: read from remoteReader, write to localWriter.
 	go func() {
 		defer wg.Done()
 		if err := copyWithFlush(localWriter, remoteReader); err != nil {
@@ -233,6 +259,7 @@ func handleConnection(localConn net.Conn, targetAddr string, listenCompress, rem
 func printStats() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+
 	for range ticker.C {
 		log.Println("------- STATISTICS REPORT -------")
 		total := atomic.LoadInt64(&totalConnections)
@@ -256,11 +283,26 @@ func printStats() {
 			}
 		}
 		activeMutex.Unlock()
+
+		// Get the current ulimit (file descriptor limit)
+		var rLimit syscall.Rlimit
+		if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+			log.Printf("Error getting RLIMIT_NOFILE: %v", err)
+		} else {
+			openFDs, err := getOpenFDCount()
+			if err != nil {
+				log.Printf("Error counting open file descriptors: %v", err)
+			} else {
+				log.Printf("Open file descriptors: %d / %d", openFDs, rLimit.Cur)
+			}
+		}
+
 		log.Println("---------------------------------")
 	}
 }
 
 func main() {
+	setUlimit(1000000)
 	// Command-line flags.
 	listenAddr := flag.String("listen", ":8080", "Listen address (e.g. :8080)")
 	targetAddr := flag.String("target", "", "Target address (e.g. localhost:9000)")
